@@ -1,0 +1,42 @@
+variables:
+  MAVEN_CLI_OPTS: "-s .m2/settings.xml --batch-mode"
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+  DEPLOY_VARIABLE: "test"
+  SERVICE_NAME: ${APP_SHORT_NAME}
+  IMAGE_NAME: ${APP_SHORT_NAME}
+
+.build-artifacts:
+  image: node:16-alpine
+  stage: build
+  before_script:
+    - apk add --no-cache git maven bash curl wget
+    - apk --no-cache add openjdk17-jdk
+    - apk add --no-cache python3 py3-pip
+    - curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-425.0.0-linux-x86_64.tar.gz > /tmp/google-cloud-cli.tar.gz
+    - mkdir -p /usr/local/gcloud
+    - tar -xzf /tmp/google-cloud-cli.tar.gz -C /usr/local/gcloud
+    - chmod -R 777 /usr/local/gcloud/
+    - /usr/local/gcloud/google-cloud-sdk/install.sh --quiet
+    - PATH=$PATH:/usr/local/gcloud/google-cloud-sdk/bin
+    - echo <#noparse>${SERVICE_ACCOUNT_KEYFILE_JSON}</#noparse> > client-secret.json
+    - gcloud auth activate-service-account --key-file client-secret.json
+    - export GOOGLE_APPLICATION_CREDENTIALS=client-secret.json
+    - npm install -g @angular/cli
+  script:
+    - rm -rf .m2/repository
+    - echo 'Build for environment...'
+    - mvn  $MAVEN_CLI_OPTS clean install -P $MAVEN_PROFILE
+    #- mvn $MAVEN_CLI_OPTS -f BackendApp/pom.xml com.google.cloud.tools:jib-maven-plugin:3.3.1:build
+    - mvn -f BackendApp/pom.xml jib:build -P cloud-run-$MAVEN_PROFILE -s .m2/settings.xml --batch-mode -X -D IMAGE_VERSION_ID=<#noparse>${IMAGE_VERSION_ID}</#noparse> -D COMMIT_ID=$CI_COMMIT_SHA
+  cache:
+    - key: ${APP_NAME}
+      paths:
+        - ${APP_NAME}/node_modules/*
+
+<#list ENV_LIST as ENV>
+include: '/gitlab-config/${ENV.name?lower_case}-build.yml'
+build-${ENV.name?lower_case}-artifacts:
+  extends: .build-artifacts
+  only:
+    - ${ENV.gitBranchName}
+</#list>

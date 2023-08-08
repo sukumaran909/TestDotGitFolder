@@ -1,0 +1,46 @@
+name: Deployment script
+run-name: Deployment Runner 
+on: [push, workflow_dispatch]
+
+env:
+  IMAGE_NAME: <#noparse>${{secrets.REGION_ID}}</#noparse>-docker.pkg.dev/<#noparse>${{secrets.GCP_PROJECT_ID}}</#noparse>/appengine1-repository/${APP_SHORT_NAME}
+  VPC_CONNECTOR: ${VPC_CONNECTOR}
+  REGION_ID: ${REGION_ID}
+
+jobs:
+  deployment:
+    if: contains( 'refs/heads/development', github.ref)
+    runs-on: ubuntu-latest
+    container: node:16-alpine
+    steps:
+    - name: Setting up environment for build...
+      run: |
+        apk add --no-cache git maven bash curl wget
+        apk --no-cache add openjdk17-jdk
+        apk add --no-cache python3 py3-pip
+    
+    - name: Checking out the code...
+      uses: actions/checkout@3
+    
+    - name: Github authentication
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: <#noparse>${{secrets.SERVICE_ACCOUNT_KEYFILE_JSON}}</#noparse>
+      
+    - name: Building project...
+      run: |
+        npm install -g @angular/cli
+        mvn -s .m2/settings.xml --batch-mode clean install -D IMAGE_VERSION_ID=<#noparse>${{env.IMAGE_NAME}}<#/noparse> -D COMMIT_ID=$CI_COMMIT_SHA
+        mvn -f BackendApp/pom.xml jib:build -P cloud-run-dev -s .m2/settings.xml --batch-mode
+
+    - name: Login
+      uses: google-github-actions/setup-gcloud@v0
+      with:
+        project_id: <#noparse>${{secrets.GCP_PROJECT_ID}}</#noparse>
+        service_account_email: <#noparse>${{secrets.GCP_EMAIL}}</#noparse>
+        service_account_key: <#noparse>${{secrets.SERVICE_ACCOUNT_KEYFILE_JSON}}</#noparse>
+    
+    - name: Deploying image...
+      run: |
+        export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+        gcloud beta run deploy csf --use-http2 --service-account=<#noparse>${{secrets.CLOUD_RUN_DEFAULT_SERVICE_ACCOUNT}}</#noparse> --image=<#noparse>${{env.IMAGE_NAME}}</#noparse> --vpc-connector=<#noparse>${{env.VPC_CONNECTOR}]</#noparse> --region=<#noparse>${{env.REGION_ID}}</#noparse> --platform=managed --timeout=600s --concurrency=80 --no-use-http2 --allow-unauthenticated --quiet --vpc-egress=all-traffic --user-output-enabled --port=9090 --max-instances=10 --min-instances=0 --cpu=2 --memory=1Gi --set-env-vars JAVA_TOOL_OPTIONS="-Xss256k" --execution-environment=gen2 --update-secrets=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-ID=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-ID:latest,SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-SECRET=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-SECRET:latest

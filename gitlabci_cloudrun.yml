@@ -1,0 +1,148 @@
+variables:
+  MAVEN_CLI_OPTS: "-s .m2/settings.xml --batch-mode"
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+  DEPLOY_VARIABLE: "test"
+  SERVICE_NAME: ${APP_SHORT_NAME}
+  IMAGE_NAME: ${APP_SHORT_NAME}
+
+cache:
+  - key: ${APP_NAME}
+    paths: 
+      - ${APP_NAME}/node_modules/*
+
+.build-artifacts:
+  image: node:16-alpine
+  stage: build
+  before_script:
+    - apk add --no-cache git maven bash curl wget
+    - apk --no-cache add openjdk17-jdk
+    - apk add --no-cache python3 py3-pip
+    - curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-425.0.0-linux-x86_64.tar.gz > /tmp/google-cloud-cli.tar.gz
+    - mkdir -p /usr/local/gcloud
+    - tar -xzf /tmp/google-cloud-cli.tar.gz -C /usr/local/gcloud
+    - chmod -R 777 /usr/local/gcloud/
+    - /usr/local/gcloud/google-cloud-sdk/install.sh --quiet
+    - PATH=$PATH:/usr/local/gcloud/google-cloud-sdk/bin
+    - echo <#noparse>${SERVICE_ACCOUNT_KEYFILE_JSON}</#noparse> > client-secret.json
+    - gcloud auth activate-service-account --key-file client-secret.json
+    - export GOOGLE_APPLICATION_CREDENTIALS=client-secret.json
+    - npm install -g @angular/cli
+  script:
+    - rm -rf .m2/repository
+    - echo 'Build for environment...' 
+    - mvn  $MAVEN_CLI_OPTS clean install -P $MAVEN_PROFILE
+    #- mvn $MAVEN_CLI_OPTS -f BackendApp/pom.xml com.google.cloud.tools:jib-maven-plugin:3.3.1:build
+    - mvn -f BackendApp/pom.xml jib:build -P cloud-run-$MAVEN_PROFILE -s .m2/settings.xml --batch-mode -X -D IMAGE_VERSION_ID=<#noparse>${IMAGE_VERSION_ID}</#noparse> -D COMMIT_ID=$CI_COMMIT_SHA
+  cache:
+    - key: ${APP_NAME}
+      paths:
+        - ${APP_NAME}/node_modules/*
+
+<#list ENV_LIST as ENV>
+build-${ENV.name?lower_case}-artifacts:
+  extends: .build-artifacts
+  environment: ${ENV.name?lower_case}
+  only:
+    - ${ENV.gitBranchName}
+</#list>
+
+
+.deploy-cloud-run:
+  image: google/cloud-sdk:alpine
+  stage: deploy
+  cache: []
+  script:
+    - echo "Configuring google-cloud-sdk..."
+    
+    - export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+    - export PATH=<#noparse>${PATH}:${HOME}</#noparse>/google-cloud-sdk/bin
+    - echo <#noparse>${SERVICE_ACCOUNT_KEYFILE_JSON}</#noparse> > client-secret.json
+    - gcloud auth activate-service-account --key-file client-secret.json
+    - gcloud config set project $PROJECT_ID
+<#if LOGIN_TYPE == "google">	
+    - gcloud beta run deploy ${APP_SHORT_NAME} --use-http2 --service-account=<#noparse>${CLOUD_RUN_DEFAULT_SERVICE_ACCOUNT}</#noparse> --image=<#noparse>${REGION_ID}</#noparse>-docker.pkg.dev/<#noparse>${PROJECT_ID}</#noparse>/<#noparse>${IMAGE_NAME}</#noparse>-repository/<#noparse>${IMAGE_NAME}</#noparse> --vpc-connector=<#noparse>${VPC_CONNECTER}</#noparse> --region=<#noparse>${REGION_ID}</#noparse> --platform=managed --timeout=600s --concurrency=80 --no-use-http2 --allow-unauthenticated --user-output-enabled --port=9090 --max-instances=10 --min-instances=0 --cpu=2 --memory=1Gi --set-env-vars JAVA_TOOL_OPTIONS="-Xss256k" --execution-environment=gen2 --update-secrets=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-ID=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-ID:latest,SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-SECRET=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-SECRET:latest
+<#elseif LOGIN_TYPE == "okta">
+    - gcloud beta run deploy ${APP_SHORT_NAME} --use-http2 --service-account=<#noparse>${CLOUD_RUN_DEFAULT_SERVICE_ACCOUNT}</#noparse> --image=<#noparse>${REGION_ID}</#noparse>-docker.pkg.dev/<#noparse>${PROJECT_ID}</#noparse>/<#noparse>${IMAGE_NAME}</#noparse>-repository/<#noparse>${IMAGE_NAME}</#noparse> --vpc-connector=<#noparse>${VPC_CONNECTER}</#noparse> --region=<#noparse>${REGION_ID}</#noparse> --platform=managed --timeout=600s --concurrency=80 --no-use-http2 --allow-unauthenticated --user-output-enabled --port=9090 --max-instances=10 --min-instances=0 --cpu=2 --memory=1Gi --set-env-vars JAVA_TOOL_OPTIONS="-Xss256k" --execution-environment=gen2 --update-secrets=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_OKTA_CLIENT-ID=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_OKTA_CLIENT-ID:latest,SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_OKTA_CLIENT-SECRET=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_OKTA_CLIENT-SECRET:latest
+<#else>
+    - gcloud beta run deploy ${APP_SHORT_NAME} --use-http2 --service-account=<#noparse>${CLOUD_RUN_DEFAULT_SERVICE_ACCOUNT}</#noparse> --image=<#noparse>${REGION_ID}</#noparse>-docker.pkg.dev/<#noparse>${PROJECT_ID}</#noparse>/<#noparse>${IMAGE_NAME}</#noparse>-repository/<#noparse>${IMAGE_NAME}</#noparse> --vpc-connector=<#noparse>${VPC_CONNECTER}</#noparse> --region=<#noparse>${REGION_ID}</#noparse> --platform=managed --timeout=600s --concurrency=80 --no-use-http2 --allow-unauthenticated --user-output-enabled --port=9090 --max-instances=10 --min-instances=0 --cpu=2 --memory=1Gi --set-env-vars JAVA_TOOL_OPTIONS="-Xss256k" --execution-environment=gen2 --update-secrets=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-ID=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-ID:latest,SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-SECRET=SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENT-SECRET:latest
+</#if>
+<#list ENV_LIST as ENV>
+deploy to ${ENV.name?lower_case}:
+  extends: .deploy-cloud-run
+  environment: ${ENV.name?lower_case}
+  variables:
+    REGION_ID: "${ENV.regionName?lower_case}"
+    VPC_CONNECTER: "${ENV.vpcConnectorName?lower_case}"
+    GIT_STRATEGY: fetch
+  needs:
+    - job: build-${ENV.name?lower_case}-artifacts
+      artifacts: true
+  only:
+    - ${ENV.gitBranchName}
+ </#list>
+
+
+ 
+.generate-schema:
+  variables:
+    GIT_STRATEGY: fetch
+  stage: .post
+  script:
+    - apk add curl
+    - export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+    - echo <#noparse>${SERVICE_ACCOUNT_KEYFILE_JSON}</#noparse> > client-secret.json
+    - gcloud auth activate-service-account --key-file client-secret.json
+    - gcloud config set project $PROJECT_ID
+    - cloud_run_url=$(gcloud run services describe <#noparse>${SERVICE_NAME}</#noparse> --platform managed --region europe-west1 --format 'value(status.url)')
+    - echo creating bq tables
+    - curl -X POST $cloud_run_url"/rest/deploy/setup?action=<#noparse>${action}</#noparse>" --fail-with-body
+    - echo completed bq execution
+
+<#list ENV_LIST as ENV>
+generate-bq-schema-${ENV.name?lower_case}:
+  when: manual
+  variables:
+    action: ANALYTICAL
+  environment: ${ENV.name?lower_case}
+  image: google/cloud-sdk:alpine
+  extends: [.generate-schema]
+  only:
+    - ${ENV.gitBranchName}
+</#list>
+
+<#list ENV_LIST as ENV>
+generate-es-schema-${ENV.name?lower_case}:
+  when: manual
+  variables:
+    action: SEARCH
+  environment: ${ENV.name?lower_case}
+  image: google/cloud-sdk:alpine
+  extends: [.generate-schema]
+  only:
+    - ${ENV.gitBranchName}
+</#list>
+
+.create-sql:
+  variables:
+    GIT_STRATEGY: fetch
+  stage: .post
+  script:
+    - apk add curl
+    - export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+    - echo <#noparse>${SERVICE_ACCOUNT_KEYFILE_JSON}</#noparse> > client-secret.json
+    - gcloud auth activate-service-account --key-file client-secret.json
+    - gcloud config set project $PROJECT_ID
+    - cloud_run_url=$(gcloud run services describe <#noparse>${SERVICE_NAME}</#noparse> --platform managed --region europe-west1 --format 'value(status.url)')
+    - echo creating sql script
+    - curl -X POST $cloud_run_url"/rest/rdbms/generatesqlscript" --fail-with-body
+    - echo created sql script
+
+<#list ENV_LIST as ENV>
+create-sql-${ENV.name?lower_case}:
+  when: manual
+  environment: ${ENV.name?lower_case}
+  image: google/cloud-sdk:alpine
+  extends: [.create-sql]
+  only:
+    - ${ENV.gitBranchName}
+</#list>
